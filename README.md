@@ -144,3 +144,27 @@ This observation becomes part of the next LLM input, closing the loop.
 | Loop never terminates | Always check for `FINAL ANSWER` first; enforce `MAX_ITERATIONS` |
 | Same action repeated | The loop guard catches this, but also check: is the observation being added to the buffer? |
 | Memory block added even when empty | Check `semantic_memory.count() == 0` before calling `.retrieve()` |
+
+
+## Completed implementation: running this fork
+
+Use Python 3.12 and `pip install -r requirements-tested.txt`. These are the
+versions actually tested; the original broad requirements are retained for
+reference.
+
+The starter's tests are at the repository root, so use `python -m pytest -q`.
+Lab 1.3's real API test requires `--run-llm`; Lab 1.4's supplied framework tests
+make live calls.
+
+For the course route, configure your own credentials using `.env.example`.
+For direct OpenAI, keep a private file outside the repository with `LLM_API_KEY`
+or `OPENAI_API_KEY`, then run:
+
+```sh
+python run_openai.py --env /absolute/path/to/private.env smoke_run.py
+python run_openai.py --env /absolute/path/to/private.env pytest -q --run-llm
+```
+
+The launcher does not persist keys. Verification used direct OpenAI, not Helicone.
+Upstream hardcoded credentials were removed from current files and setup scripts;
+the upstream history still requires credential rotation by its owner.

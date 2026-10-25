@@ -67,9 +67,21 @@ FORMAT B – when the task is complete:
     Thought: <brief explanation of what you produced>
     FINAL ANSWER: <the deliverable: code, explanation, result, or a file path>
 
+## Tools
+
+Use exactly one of these Action names per response:
+- write_file: {{"path": "word_frequency.py", "content": "complete source"}}
+- read_file: {{"path": "word_frequency.py"}}
+- exec_python: {{"code": "import sys; sys.path.insert(0, 'workspace'); ..."}}
+Never use multi_tool_use.parallel or a functions. prefix.
+
 ## Rules
 
 - Always emit a Thought before every Action or FINAL ANSWER.
+- File tool paths are relative to workspace: use word_frequency.py, not
+  workspace/word_frequency.py. Execution runs from the repository directory;
+  use workspace/file.py or add workspace to sys.path when importing.
+- Follow the current task filenames exactly and verify the written file before finishing.
 - Action Input must be a single-line valid JSON object.
 - Never invent tool results; always wait for the Observation.
 - If a tool returns an ERROR, try to fix the issue rather than repeating
@@ -134,7 +146,14 @@ def build_system_prompt(semantic_memory: SemanticMemory, task: str) -> str:
     str
         The complete system prompt, with memories appended if available.
     """
-    raise NotImplementedError("TODO: implement build_system_prompt()")
+    if semantic_memory.count() == 0:
+        return SYSTEM_PROMPT
+    memories = semantic_memory.retrieve(task, top_k=3)
+    if not memories:
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT + "\n\n## Relevant memories\n" + "\n".join(
+        "- " + memory for memory in memories
+    )
 
 
 def parse_llm_response(response_text: str) -> dict[str, Any]:
@@ -184,7 +203,22 @@ def parse_llm_response(response_text: str) -> dict[str, Any]:
     dict
         A structured dict with the keys described above.
     """
-    raise NotImplementedError("TODO: implement parse_llm_response()")
+    import re
+    thought_match = re.search(r"(?m)^\s*Thought:\s*(.*)", response_text)
+    thought = thought_match.group(1).strip() if thought_match else ""
+    if "FINAL ANSWER:" in response_text:
+        return {"thought": thought, "final_answer": response_text.split("FINAL ANSWER:", 1)[1].strip()}
+    action_match = re.search(r"(?m)^\s*Action:\s*([^\n]+)", response_text)
+    action = action_match.group(1).strip() if action_match else ""
+    try:
+        if not action or "Action Input:" not in response_text:
+            raise ValueError("Expected Action and Action Input, or FINAL ANSWER")
+        args = json.loads(response_text.split("Action Input:", 1)[1].strip())
+        if not isinstance(args, dict):
+            raise ValueError("Action Input must be a JSON object")
+        return {"thought": thought, "action": action, "action_input": args}
+    except (ValueError, TypeError) as exc:
+        return {"thought": thought, "action": action, "parse_error": str(exc)}
 
 
 def run_agent(task: str) -> AgentResult:
@@ -235,7 +269,39 @@ def run_agent(task: str) -> AgentResult:
         Structured result including the final answer, iteration count,
         and a log of all tool calls made.
     """
-    raise NotImplementedError("TODO: implement run_agent()")
+    buffer = SlidingWindowBuffer()
+    semantic_memory = SemanticMemory()
+    buffer.set_system(build_system_prompt(semantic_memory, task))
+    buffer.add("user", task)
+    tool_calls = []
+    for iteration in range(1, MAX_ITERATIONS + 1):
+        response = client.chat.completions.create(
+            model=MODEL, messages=buffer.messages(), tools=TOOL_SCHEMAS,
+            tool_choice="none",
+        )
+        text = response.choices[0].message.content or ""
+        buffer.add("assistant", text)
+        parsed = parse_llm_response(text)
+        if "final_answer" in parsed:
+            answer = parsed["final_answer"]
+            semantic_memory.store("Task: " + task + "\nAnswer: " + answer)
+            return AgentResult(answer, iteration, tool_calls, False)
+        if "parse_error" in parsed:
+            buffer.add("user", "OBSERVATION: Parse error – " + parsed["parse_error"])
+            continue
+        # Accept SDK-style names and repository-relative paths without nesting workspace.
+        parsed["action"] = parsed["action"].removeprefix("functions.")
+        arguments = parsed["action_input"]
+        if parsed["action"] in ("read_file", "write_file"):
+            path = arguments.get("path")
+            if isinstance(path, str):
+                arguments["path"] = path.removeprefix("./").removeprefix("workspace/")
+        result = dispatch_tool(parsed["action"], arguments)
+        tool_calls.append({"tool": parsed["action"], "args": parsed["action_input"], "result": result})
+        if not result.startswith("ERROR"):
+            semantic_memory.store(result)
+        buffer.add("user", "OBSERVATION: " + result)
+    return AgentResult("MAX_ITERATIONS reached", MAX_ITERATIONS, tool_calls, True)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
